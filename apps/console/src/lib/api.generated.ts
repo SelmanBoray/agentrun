@@ -3183,6 +3183,13 @@ export interface operations {
     body: never;
     answer: Record<string, unknown>;
   };
+  getRevisionSkills: {
+    body: never;
+    answer: {
+      revision: string;
+      skills: Record<string, string>;
+    };
+  };
   getRun: {
     body: never;
     answer: components["Run"];

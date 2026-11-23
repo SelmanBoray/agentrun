@@ -11,7 +11,6 @@ import { AgentEditPage, AgentsPage } from "@/components/AgentsPage";
 import { ChatGPTRow } from "@/components/ChatGPTSignIn";
 import { ClaudeLoginRow } from "@/components/ClaudeLoginRow";
 import { ModelGatewayRow } from "@/components/ModelGatewayRow";
-import { BuildAgent } from "@/components/BuildAgent";
 import { RunsRequest } from "@/components/RunsRequest";
 import { queryPlaygroundHref } from "@/lib/playgroundRoutes";
 import { AgentRequest, type AgentOperation } from "@/components/AgentRequest";
@@ -77,7 +76,7 @@ const MODEL_CHECK_MS = 10_000;
 
 /** `agent`: an agent's page (at `tab`), or with `edit` its editor; null is a new agent's editor. `runsOf`, `status` and
  *  `archived` (for runs): the runs list's filters. `settings`: a settings page. */
-type Where = { repo?: string; observation?: string; nativeConnect?: boolean; connectionSource?: "server" | "remote" | "observe"; section: Section; template?: string; install?: string; playgroundAgent?: string; operation?: AgentOperation | "list-runs" | "apply-template"; draft?: string; run?: string; trigger?: string | null; kind?: "schedule" | "webhook" | "github" | "composio" | "feed" | "email"; agent?: string | null; edit?: boolean; tool?: string; tab?: string; runsOf?: string; archived?: boolean; status?: RunStatus; settings?: SettingsPage; signIn?: ReturnType<typeof signInOf>; add?: ReturnType<typeof addOf>; github?: ReturnType<typeof githubReturnOf> };
+type Where = { repo?: string; observation?: string; nativeConnect?: boolean; connectionSource?: "server" | "remote" | "observe"; section: Section; template?: string; install?: string; playgroundAgent?: string; operation?: AgentOperation | "list-runs" | "apply-template"; draft?: string; run?: string; trigger?: string | null; kind?: "schedule" | "webhook" | "github" | "composio" | "feed" | "email"; agent?: string | null; edit?: boolean; initialInstructions?: string; settingsSection?: "tools" | "skills"; tool?: string; tab?: string; runsOf?: string; archived?: boolean; status?: RunStatus; settings?: SettingsPage; signIn?: ReturnType<typeof signInOf>; add?: ReturnType<typeof addOf>; github?: ReturnType<typeof githubReturnOf> };
 /** The page an address opens. Exported for its test. */
 export function route(h: string = location.hash): Where {
   if (h === "#/dojo") return { section: "dojo" };
@@ -89,10 +88,19 @@ export function route(h: string = location.hash): Where {
     const source = new URLSearchParams(h.split("?")[1] ?? "").get("source");
     return { section: "agents", nativeConnect: true, ...(source === "remote" || source === "observe" ? { connectionSource: source } : {}) };
   }
-  if (h === "#/agents/new") return { section: "agents", agent: null };
-  // An agent's Tools, on one tool's permission (a start refused for it links here).
-  m = h.match(/^#\/agents\/([^/?]+)\/edit\?(.*)$/);
-  if (m) { const tool = new URLSearchParams(m[2]).get("tool"); return { section: "agents", agent: decodeURIComponent(m[1]), edit: true, ...(tool ? { tool } : {}) }; }
+  if (h === "#/agents/new" || h.startsWith("#/agents/new?")) {
+    const params = new URLSearchParams(h.split("?")[1] ?? "");
+    const edit = params.get("editor") === "true";
+    const instructions = params.get("instructions");
+    return { section: "agents", agent: null, ...(edit ? { edit: true, ...(instructions ? { initialInstructions: instructions } : {}) } : {}) };
+  }
+  // Agent settings can open at Tools, or focus one tool's permission. Older /edit links still work.
+  m = h.match(/^#\/agents\/([^/?]+)\/(edit|settings)(?:\?(.*))?$/);
+  if (m) {
+    const params = new URLSearchParams(m[3] ?? ""), tool = params.get("tool");
+    return { section: "agents", agent: decodeURIComponent(m[1]), ...(m[2] === "edit" ? { edit: true } : { tab: "settings" }),
+      ...((params.get("section") === "tools" || params.get("section") === "skills") ? { settingsSection: params.get("section") as "tools" | "skills" } : {}), ...(tool ? { tool } : {}) };
+  }
   m = h.match(/^#\/agents\/([^/?]+)(?:\/([a-z]+))?$/);
   if (m) return { section: "agents", agent: decodeURIComponent(m[1]), ...(m[2] === "edit" ? { edit: true } : m[2] ? { tab: m[2] } : {}) };
   if (h.startsWith("#/agents")) return { section: "agents", archived: /[?&]archived=true\b/.test(h) };
@@ -677,6 +685,7 @@ function ConsolePage({ v2, onSignedOut }: ConsoleProps) {
   // The server's learning switch: undefined until its capabilities are read, null on a server without learning.
   const learningCap = caps ? ((caps as unknown as { features?: { learning?: "on" | "off" } }).features?.learning ?? null) : undefined;
   editorCaps.learning = learningCap ?? undefined;
+  const fullEditorCaps: EditorCaps = { ...editorCaps, routePrefix: c?.models?.route_prefix, decisionProvider: decisionProvider((caps as unknown as { workflows?: Parameters<typeof decisionProvider>[0] } | null)?.workflows), places: placesOf(caps), mcp: !!caps?.features?.mcp_client, mcpHarnesses: caps?.features?.mcp_client?.harnesses };
   // While no managed model is ready, read capabilities again every MODEL_CHECK_MS and when the page returns to view,
   // so execution and learning setup clear once their models are configured. Native connections use their own authentication.
   const modelsReady = caps?.models?.ready;
@@ -717,7 +726,7 @@ function ConsolePage({ v2, onSignedOut }: ConsoleProps) {
   const playgroundTarget = where.operation ? where.playgroundAgent : pick ?? where.playgroundAgent;
   return (
     <ScheduleNames.Provider value={scheduleNames}>
-    <Shell active={where.section} building={where.section === "agents" && where.agent === null} onBuild={() => go("#/agents/new")} settings={settingsOffered.length > 0} triggers={scheduling} onNavigate={nav} onSignOut={() => {
+    <Shell active={where.section} settings={settingsOffered.length > 0} triggers={scheduling} onNavigate={nav} onSignOut={() => {
       // The card comes back only once the server ended the session: a sign-out that did not reach it says so instead.
       // A sign-out leaves the page as a move does: a page with unsaved changes asks first, and Leave signs out.
       const out = () => void v2.signOut().then(onSignedOut, (e) => setSignOutError(e instanceof ClientError ? e.message : "The sign-out did not reach the server. Try again."));
@@ -797,10 +806,10 @@ function ConsolePage({ v2, onSignedOut }: ConsoleProps) {
         : where.section === "agents"
         ? where.observation ? <ObservedSessionPage v2={v2} sessionId={where.observation} go={go} /> : where.nativeConnect ? <NativeConnections v2={v2} go={go} initialSource={where.connectionSource} />
           : where.agent === undefined ? <AgentsPage key={refreshed} v2={v2} archived={!!where.archived} go={go} learning={learningCap} />
-          : where.agent === null ? <BuildAgent origin={location.origin} v2={v2} />
-          : where.agent !== null && !where.edit ? <AgentPage key={where.agent} v2={v2} agentId={where.agent} tab={where.tab} learning={learningCap} routePrefix={c?.models?.route_prefix} harnesses={editorCaps.harnesses} efforts={efforts} limits={caps?.limits} places={placesOf(caps)} go={go} />
+          : where.agent !== null ? <AgentPage key={where.agent} v2={v2} agentId={where.agent} tab={where.edit ? "settings" : where.tab} learning={learningCap} routePrefix={c?.models?.route_prefix} harnesses={editorCaps.harnesses} efforts={efforts} limits={caps?.limits} places={placesOf(caps)} go={go}
+              renderEditor={(onAgent, onEditPromptChange) => <AgentEditPage key={`${where.agent}:${where.edit ? "edit" : "settings"}:${where.settingsSection ?? ""}:${where.tool ?? ""}`} initialStep={where.settingsSection} embedded onAgent={onAgent} onEditPromptChange={onEditPromptChange} v2={v2} choices={choices} gates={gates} focusTool={where.tool} caps={fullEditorCaps} agentId={where.agent!} go={go} />} />
           // A new decision agent's judge names the server's decision provider (agentForm's decisionProvider).
-          : <AgentEditPage key={`${where.agent ?? "new"}:${where.tool ?? ""}`} v2={v2} choices={choices} gates={gates} focusTool={where.tool} caps={{ ...editorCaps, routePrefix: c?.models?.route_prefix, decisionProvider: decisionProvider((caps as unknown as { workflows?: Parameters<typeof decisionProvider>[0] } | null)?.workflows), places: placesOf(caps), mcp: !!caps?.features?.mcp_client, mcpHarnesses: caps?.features?.mcp_client?.harnesses }} agentId={where.agent} go={go} />
+          : <AgentEditPage key={`new:${where.edit ? "legacy-editor" : "editor"}:${where.initialInstructions ?? ""}`} v2={v2} choices={choices} gates={gates} caps={fullEditorCaps} initialInstructions={where.initialInstructions} agentId={null} go={go} />
         : where.run ? <LiveRun key={where.run} v2={v2} runId={where.run} caps={caps} agentName={agentName} />
         : <RunsList observations={!where.runsOf && !where.archived && !where.status ? observations : undefined} runs={runs} agentName={agentName} agentId={where.runsOf} error={error} onRetry={() => setRunsTry((n) => n + 1)} onOpen={(id) => go(`#/runs/${encodeURIComponent(id)}`)} loadingMore={more}
             filter={runsFilter} onFilter={(f) => go(runsHash({ runsOf: where.runsOf, ...f }))}
